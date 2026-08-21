@@ -1,0 +1,4 @@
+# Per-PR decision-log files take blind appends (newest at the bottom); union-merge
+# auto-resolves concurrent appends on LOCAL merges. CLAUDE.md is deliberately NOT
+# union-merged — its curated synthesis benefits from manual conflict resolution.
+docs/decisions/*.md merge=union

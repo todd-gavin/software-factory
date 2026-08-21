@@ -1,0 +1,294 @@
+# {{PROJECT_NAME}} — Global Conventions
+
+This file governs all work in this repository. Read it before making changes;
+keep it current when a convention changes.
+
+<!-- HOW TO USE THIS TEMPLATE
+     1. Replace every {{PLACEHOLDER}} — the dictionary is in
+        software-factory/PLACEHOLDERS.md.
+     2. Delete the layout variant (§1) that does not apply to this repo.
+     3. Empty the "Current state and standing decisions" section down to your
+        real starting state. Do NOT ship the example paragraph.
+     4. Delete these HTML comments when you are done.
+     Design rationale for every rule below: software-factory/doctrine/. -->
+
+---
+
+## Environments and workflow (read first)
+
+This project runs a strict **local → staging → production** model. The rules below
+always apply; the detail lives in the **skills** (`.claude/skills/`), which
+**auto-load when your task matches** — listed at the end of this section.
+
+**Branches (two, long-lived).** `{{PROD_BRANCH}}` = production,
+`{{STAGING_BRANCH}}` = staging. **Never commit or push directly to either.** All
+work is a feature branch cut from `{{STAGING_BRANCH}}`, merged via PR **into
+`{{STAGING_BRANCH}}`**. Stacked PRs merge **bottom-up**. Promoting to production is
+a deliberate PR from **`{{STAGING_BRANCH}}` → `{{PROD_BRANCH}}`**.
+
+**Environments (three, no shared resources).**
+
+| | git branch | Supabase | {{HOST_PLATFORM}} | API keys |
+|---|---|---|---|---|
+| **local** | a feature branch | dev branch `{{SUPABASE_DEV_BRANCH_REF}}` | — (`{{DEV_CMD}}`) | local `.env.local` |
+| **staging / preview** | `{{STAGING_BRANCH}}` | dev branch `{{SUPABASE_DEV_BRANCH_REF}}` | every Preview deploy | staging keys |
+| **production** | `{{PROD_BRANCH}}` | project `{{SUPABASE_PROD_REF}}` | Production deploy | prod keys |
+
+**Nothing but `{{PROD_BRANCH}}` touches a production resource.**
+
+**{{HOST_PLATFORM}} env scoping.** The Production scope holds prod values and
+serves `{{PROD_BRANCH}}` only; the Preview scope (all branches) holds staging
+values and serves `{{STAGING_BRANCH}}` and every PR preview. Cross-service and
+self URLs must be environment-consistent — staging points at staging, prod at
+prod, local at localhost. The committed `{{ENV_EXAMPLE_PATH}}` is the **variable
+list**; real values live in `.env.local` (local) and the hosting dashboard.
+
+**Database & migrations.** Migrations in `{{MIGRATIONS_DIR}}` **auto-apply to the
+dev branch on push to `{{STAGING_BRANCH}}`**; the promotion runs them on prod.
+**Never run `supabase db push` or a blanket `supabase migration up` against
+production.** Re-seed staging with `{{SEED_SCRIPT_PATH}}`. **Always verify which
+database and environment you are writing to before writing.**
+
+**Decision log.** Append **one entry per PR** to the current month's file in
+`docs/decisions/` (NOT to CLAUDE.md), then distill any durable conclusion up into
+"Current state and standing decisions" below — see the `logging-and-curation`
+skill. `.gitattributes` sets `merge=union` on `docs/decisions/*.md` so concurrent
+appends auto-resolve — **but only on local merges.** Do integration merges
+**locally**, not through the GitHub web UI, or the union driver won't run.
+
+**Detail (skills — in `.claude/skills/`, auto-load on the matching task):**
+[`branch-and-pr-workflow`](.claude/skills/branch-and-pr-workflow/SKILL.md) ·
+[`environments-and-env-vars`](.claude/skills/environments-and-env-vars/SKILL.md) ·
+[`database-and-migrations`](.claude/skills/database-and-migrations/SKILL.md) ·
+[`staging-verification`](.claude/skills/staging-verification/SKILL.md) ·
+[`resume-cold-handoff`](.claude/skills/resume-cold-handoff/SKILL.md) ·
+[`logging-and-curation`](.claude/skills/logging-and-curation/SKILL.md) ·
+[`devops-overview`](.claude/skills/devops-overview/SKILL.md) — the map.
+
+---
+
+## Current state and standing decisions
+
+The durable, current truths that define the project **now** — conclusions, not
+chronology. The per-PR record lives in `docs/decisions/`. When a change alters one
+of these truths, **supersede** the statement here (don't append); see the
+`logging-and-curation` skill. Keep this section lean.
+
+<!-- START WITH YOUR REAL STATE. The paragraph below is a SHAPE EXAMPLE showing
+     the house style: bolded lead-in naming the concern, then conclusions in the
+     present tense, naming the one authoritative module. Delete it. -->
+
+**Context architecture (this repo's own docs).** CLAUDE.md is the curated, lean
+source of *current truth* (rules + this section + the index).
+`docs/decisions/<month>.md` is the chronological *what-happened-and-why* per-PR log
+(`merge=union`, append-only). Guidance lives as auto-loading skills in
+`.claude/skills/`. Resume work via **delta loading** (`resume-cold-handoff` skill):
+load only what changed since you last worked, not the whole history. The `/report`
+command serializes these curated sources into a dated briefing under `docs/reports/`
+— it composes, never re-derives — and lands it via a `report/<slug>` branch + PR.
+The `/dash` command prints a read-only inventory of commands and skills.
+
+<!-- Add one bolded paragraph per standing concern: environments, observability,
+     schema/security, each major subsystem. SUPERSEDE in place as things change. -->
+
+---
+
+## Standing Rules (Always Apply)
+
+### Supabase CLI — installed, linked, pointed at the right project
+
+- Any session that touches Supabase must first verify `supabase --version` works
+  and `supabase projects list` shows the correct project as **LINKED**.
+- **Canonical production project: `{{SUPABASE_PROD_REF}}`.**
+- **Persistent staging branch: `{{SUPABASE_DEV_BRANCH_REF}}`.**
+{{#ARCHIVE_REF}}
+- **`{{SUPABASE_ARCHIVE_REF}}` is a dormant archive — do NOT write to it.**
+{{/ARCHIVE_REF}}
+
+### GitHub CLI — installed and authenticated
+
+- Any session doing git work must verify `gh --version` and `gh auth status`.
+- Constraints on `gh` usage:
+  - **May:** create branches, commit, push, open PRs, comment on issues, view
+    PRs/issues.
+  - **Must NOT:** merge PRs, close PRs without explicit instruction, force-push,
+    delete branches, alter repository settings.
+  - **Every PR created by an agent must be reviewed by a human before merge.**
+
+### Decision log — maintained automatically
+
+Every session that makes a **substantive** architectural, schema, or design
+decision MUST append an entry to the **current month's file in `docs/decisions/`**
+before reporting completion — NOT to CLAUDE.md. Then distill any durable
+conclusion up into "Current state and standing decisions" above. "Substantive"
+means: schema changes, architecture choices, new dependencies, security-related
+changes. Trivial bug fixes don't need an entry. Format:
+
+```markdown
+### YYYY-MM-DD — <short title>
+**Decision:** what was decided
+**Alternatives considered:** what was rejected and why
+**Reasoning:** why this choice
+**Context:** which prompt or session, link to PR if applicable
+```
+
+### Security defaults — never skip
+
+- **RLS enabled on every table by default.** New tables get policies in the same
+  commit as table creation.
+- **Service role keys are server-side only.** Never browser-exposed, never
+  committed to git.
+- **All secrets in `.env.local` or platform env vars.** Never inlined in code.
+- **Auth validated server-side on every authenticated API route.** Never trust
+  client claims.
+- **Principle of least privilege:** the `anon` role gets nothing by default.
+- **Admin actions write to an append-only audit log.**
+- **Soft-delete only; destructive calls are fenced.** Prefer archive/supersede/
+  retire over hard deletes; migrations are additive. Any destructive database or
+  storage call in app code requires `// destructive-allowed: <reason>` on the
+  same or preceding line **plus** human sign-off in PR review (CI: the
+  `app-code-scan` job). Never add the annotation to silence the guard.
+- **Failures block during development.** Observability and pipeline failures
+  THROW and surface; nothing silently continues with unintended behavior. A
+  deliberate best-effort path must still log its failure loudly.
+
+### Schema placement — new tables go in the right PostgreSQL schema
+
+| Table kind | Schema |
+|---|---|
+| Prompt templates / versioned content | `prompts` |
+| Audit logs / admin action history | `audit` |
+| Operational data | `public` (default) |
+| System-managed | `auth`, `storage` — don't touch |
+
+When in doubt, ask before creating a table.
+
+---
+
+## 1. Repo layout
+
+<!-- KEEP ONE VARIANT, DELETE THE OTHER. -->
+
+<!-- VARIANT A — monorepo -->
+```
+{{REPO_NAME}}/
+├── apps/                 # deployable applications (own hosting project each)
+│   └── {{APP_NAME}}/     # {{APP_DESCRIPTION}} ({{APP_PORT}})
+├── packages/             # shared libraries, owned by no single app
+│   ├── db/               # the data seam: storage layer + types + SQL schema
+│   └── shared/           # client factories, helpers, shared utils
+└── docs/                 # specs (authoritative design intent)
+```
+
+- **`apps/*`** are deployables; **`packages/*`** are shared libraries.
+- Internal packages are named **`{{PACKAGE_SCOPE}}/*`** and depended on via
+  **`workspace:*`**.
+- **The seam discipline:** the schema, migrations, generated types, and shared
+  contracts live **once**, in the package layer, imported by every app. Never
+  duplicate the schema; never import one app's internals from another.
+- **Dependency direction:** `shared` depends on nothing internal; `db` depends on
+  `shared`; `apps/*` depend on packages. **No cycles.** If logic is needed by more
+  than one app, promote it into a package rather than importing across an app
+  boundary.
+- `packages/db` is the only place that talks to the database. Apps call the
+  storage layer; they don't hand-roll queries.
+
+<!-- VARIANT B — single app
+```
+{{REPO_NAME}}/
+├── src/                  # application source
+├── lib/                  # shared internal modules
+│   └── db/               # the ONLY place that talks to the database
+├── {{MIGRATIONS_DIR}}
+└── docs/
+```
+- **One seam rule survives even here:** database access lives in exactly one
+  module. Everything else calls it.
+-->
+
+## 2. Tech stack (keep consistent)
+
+{{TECH_STACK}}
+
+- **Read env lazily** — inside request handlers and functions, never at module
+  top-level — so builds and imports don't require secrets.
+
+## 3. Data & schema discipline
+
+- **Provenance is mandatory** on derived data: derived rows trace back to their
+  sources by id.
+- **Raw inputs are append-only.** Derived output is recomputed from the full raw
+  corpus, never from prior derived output.
+- **History is retained** (trigger-based `*_history` tables) so any prior state is
+  reconstructable.
+- Migrations live in **`{{MIGRATIONS_DIR}}`**. Generated types live in
+  `{{TYPES_PATH}}` — regenerate with `supabase gen types`; don't hand-edit.
+
+## 4. Decision protocol — doneness tags
+
+Specs in `docs/` tag decisions. Respect the tags:
+
+- **[LOCKED]** — a constraint. Implement as written.
+- **[OPEN-BLOCKING]** — resolve with a human **before** writing dependent code.
+  Ask, don't assume.
+- **[OPEN-EXPLORATORY]** — surface 2–4 options to choose from. Do not pick one
+  yourself.
+- **Untagged** — treat as **[OPEN-BLOCKING]**: ask first.
+
+Do not treat unmarked structure (headers, DDL, prose) as license to expand scope.
+
+## 5. Working discipline
+
+- **Behavior-preserving refactors stay behavior-preserving:** no feature creep, no
+  schema changes, no incidental dependency churn.
+- **Gate-driven execution:** for multi-step work, stop at the defined boundary and
+  report — do not auto-advance.
+- **Build in vertical slices**, each testable in isolation; don't jump ahead to
+  deferred items.
+- **Verify before claiming done:** `{{TYPECHECK_CMD}}`, `{{LINT_CMD}}`,
+  `{{BUILD_CMD}}` green on every affected app; state which tier of verification
+  you ran, and name the manual click-test a human still needs to run.
+- **`docs/` is authoritative** for design intent; update the relevant spec when
+  behavior changes.
+
+## 6. Env file convention
+
+```
+{{APP_ROOT}}/
+├── .env.local       ← actual values, gitignored, never committed
+├── .env.example     ← committed template: every var the app reads, placeholder
+│                      values, a comment per var (what it does, where to get it)
+```
+
+- **Keep `.env.example` in sync**: when an app gains or loses an env var, update
+  its `.env.example` in the same commit. No real secrets in examples, ever.
+- The root `.gitignore` ignores `.env*` and un-ignores `.env.example`.
+- **Deployed apps** get values via the hosting dashboard's Production and Preview
+  scopes. Dashboard changes are made by a human with intentional review, not from
+  agent sessions.
+
+## 7. Deployment
+
+- Each app deploys as its **own hosting project**, with its Root Directory set to
+  the app folder so runtime paths and env vars resolve correctly.
+- Apps share one database project; each supplies its own integration env vars.
+
+---
+
+## Index / where to find things
+
+- **Current truths & rules (this file):** "Environments and workflow", "Current
+  state and standing decisions", "Standing Rules", and §1–§7.
+- **Decision log (chronological, per-PR):** `docs/decisions/` + its README index.
+  `merge=union` applies here (do integration merges locally).
+- **Rolling handoff:** `docs/HANDOFF.md` — short, disposable, newest on top.
+- **Reports:** `docs/reports/` — dated portable briefings (`/report`, `/start`).
+- **Auto-loading skills** (`.claude/skills/`):
+  - `branch-and-pr-workflow` — branches, PRs, stacking, promotion.
+  - `environments-and-env-vars` — the variable→scope reference.
+  - `database-and-migrations` — migration safety + project IDs.
+  - `staging-verification` — the environment-isolation runbook.
+  - `resume-cold-handoff` — delta-load when picking up cold.
+  - `logging-and-curation` — append a decision entry + distill durable truths up.
+  - `devops-overview` — the map of the above.
+- **Design rationale for all of the above:** `software-factory/doctrine/`.

@@ -1,0 +1,101 @@
+name: destructive-migration-check
+
+# Two sibling guards against silent data destruction (see the
+# `database-and-migrations` skill for both protocols):
+#   • `scan` — blocks a PR that adds data-destructive SQL to supabase/migrations
+#     unless a human has signed off with the `destructive-migration-reviewed` label.
+#   • `app-code-scan` — blocks a PR when app code (apps/ + packages/) contains a
+#     destructive database/storage call (supabase .delete(), storage .remove(),
+#     raw DELETE/TRUNCATE/DROP in code strings) that lacks an explicit
+#     `// destructive-allowed: <reason>` annotation on the same or preceding line.
+#     Annotations are the human-review surface: each one added in a PR needs
+#     explicit reviewer sign-off.
+#
+# NOTE: these are merge-BLOCKING only once branch protection on `main`/`dev` is
+# set to REQUIRE the corresponding status checks. Until then they are advisory
+# red signals. Enabling that branch protection is what gives them teeth.
+
+on:
+  pull_request:
+    # `labeled`/`unlabeled` so adding the review label re-runs this automatically.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "supabase/migrations/**"
+      - "apps/**"
+      - "packages/**"
+      - ".github/workflows/destructive-migration-check.yml"
+      - ".github/scripts/**"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Full-tree scan of app code for unannotated destructive DB/storage calls.
+  # Scans the whole tree (not just the diff) so drift anywhere fails loudly.
+  app-code-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan app code for unannotated destructive calls
+        run: node .github/scripts/scan-destructive-app-code.mjs
+
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the base commit to diff added lines
+
+      - name: Scan added migration SQL for destructive operations
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/scan-destructive-sql.sh
+
+          mapfile -t files < <(git diff --name-only --diff-filter=AM "$BASE_SHA" HEAD -- supabase/migrations || true)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No added/modified migration files in this PR — nothing to scan."
+            exit 0
+          fi
+          echo "Scanning added SQL in migration files:"
+          printf '  - %s\n' "${files[@]}"
+          echo ""
+
+          findings=""
+          failed=0
+          for f in "${files[@]}"; do
+            added="$(git diff "$BASE_SHA" HEAD -- "$f" | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
+            if out="$(printf '%s' "$added" | .github/scripts/scan-destructive-sql.sh "$f")"; then
+              : # clean
+            else
+              failed=1
+              findings+="$out"$'\n'
+            fi
+          done
+
+          if [ "$failed" -eq 0 ]; then
+            echo "✓ No data-destructive SQL found in added migration lines."
+            exit 0
+          fi
+
+          echo "⚠ Data-destructive migration SQL detected:"
+          printf '%s\n' "$findings"
+
+          # Destructive change found → pass ONLY if a human added the review label.
+          # Read live labels (so adding the label + re-run, or the labeled trigger,
+          # both reflect current state — not a stale event payload).
+          labels="$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' || true)"
+          if printf '%s\n' "$labels" | grep -qx 'destructive-migration-reviewed'; then
+            echo "✓ Label 'destructive-migration-reviewed' present — human sign-off recorded. Passing."
+            exit 0
+          fi
+
+          echo "✗ This PR adds data-destructive migration SQL and is NOT labeled"
+          echo "  'destructive-migration-reviewed'. A human must review it, confirm it ran on"
+          echo "  the dev branch first, then add that label (the agent must NOT add it)."
+          echo "  See the database-and-migrations skill → Destructive-migration protocol."
+          exit 1

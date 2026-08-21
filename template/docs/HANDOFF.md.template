@@ -1,0 +1,23 @@
+# HANDOFF — rolling work-in-flight handoff
+
+The short, current "what just landed / what the next session needs to know" note.
+Keep it SHORT and CURRENT: **newest entry on top**, prune entries once their
+content is absorbed by CLAUDE.md or the decision log.
+
+This is **NOT a second decision log** — the durable record stays in
+`docs/decisions/` (per-PR, append-only) and CLAUDE.md (current truths). Entries
+here are disposable orientation for whoever picks the work up next: what merged,
+what to watch, what the next mount point is, which one-time script still needs to
+run.
+
+---
+
+## YYYY-MM-DD <short title>
+
+**Branches/PRs:** `feat/example` (#00) → `fix/example-2` (#00), stacked, merge
+bottom-up. Decision log + this note ride the top PR.
+
+What landed, in two or three sentences. Then the operational carry-overs, stated
+as imperatives so the next session can act on them:
+
+**After merge: <the thing to watch or run>.**

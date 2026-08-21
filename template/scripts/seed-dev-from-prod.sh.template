@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#
+# seed-dev-from-prod.sh — one-time (re-runnable) DATA-ONLY copy of production
+# into the persistent Supabase `dev` branch.
+#
+# WHY THIS EXISTS
+#   The dev branch (branch project id {{SUPABASE_DEV_BRANCH_REF}}) is built from the
+#   migration files, so it has the full SCHEMA but EMPTY tables. This script
+#   copies production's DATA (rows only — no DDL) into it so dev mirrors prod for
+#   local/branch testing. It is the out-of-band equivalent of a seed file; the
+#   [remotes.dev.db.seed] block in supabase/config.toml is a placeholder until a
+#   real supabase/seed.sql exists.
+#
+# SAFETY MODEL
+#   * SOURCE = production ({{SUPABASE_PROD_REF}}). READ-ONLY. We only pg_dump it.
+#   * TARGET = dev branch ({{SUPABASE_DEV_BRANCH_REF}}). We load data into it.
+#   * NO credentials are embedded in this file. Everything sensitive is read from
+#     the environment at run time (see "ENV" below).
+#   * Data-only dump: only rows for the app schemas (public, prompts, audit).
+#     Supabase-managed schemas (auth, storage, realtime, supabase_*, etc.) are
+#     NOT touched, so the branch keeps its own managed rows.
+#
+# IDEMPOTENCY
+#   This is a one-time seed and is safe to run against an EMPTY dev branch. It is
+#   re-runnable as a recipe, but re-running into an ALREADY-POPULATED branch will
+#   fail on primary-key conflicts (it does not upsert or truncate, by design — we
+#   never want it silently mutating existing rows). To reseed: reset the branch
+#   first (`supabase db reset` against the dev branch) or TRUNCATE the app-schema
+#   tables, then run this again.
+#
+# FOREIGN-KEY INTEGRITY
+#   The dump is prefixed with `SET session_replication_role = replica;`, which
+#   disables FK/trigger enforcement for the restore session (the reliable
+#   equivalent of pg_restore --disable-triggers). Because the restore runs the
+#   whole dump in ONE psql session, every table loads regardless of FK order.
+#   IMPORTANT: that SET only persists on a SESSION-mode connection. Use the
+#   direct connection, or the Supabase pooler on port 5432 (session mode) — NOT
+#   the transaction-mode pooler on 6543 (where SET would be discarded per
+#   statement). See DEV_DB_URL below.
+#
+# POSTGRES CLIENT VERSION
+#   pg_dump must be >= the server's major version (prod/dev are PostgreSQL 17).
+#   If your default client is older, point PG_BIN at a 17+ client bin dir, e.g.
+#   on macOS/Homebrew: export PG_BIN=/opt/homebrew/opt/postgresql@17/bin
+#
+# ── ENV ───────────────────────────────────────────────────────────────────────
+# REQUIRED
+#   DEV_DB_URL    Postgres connection string for the dev branch, INCLUDING the
+#                 freshly-rotated password, on a SESSION-mode connection.
+#                 Obtain it without printing the secret to your terminal:
+#
+#                   eval "$(supabase branches get dev -o env)"
+#                   # Direct (session mode) — best if reachable from your network:
+#                   export DEV_DB_URL="$POSTGRES_URL_NON_POOLING"
+#                   # If the direct host won't resolve (it is IPv6-only), use the
+#                   # pooler in SESSION mode (port 5432, NOT 6543):
+#                   export DEV_DB_URL="${POSTGRES_URL/:6543\//:5432/}"
+#
+# OPTIONAL
+#   PROD_DB_URL   Connection string for production. If set, the dump is taken
+#                 with a raw `pg_dump "$PROD_DB_URL"`. If UNSET (default), the
+#                 dump is rendered from `supabase db dump --linked --dry-run`
+#                 (CLI-authenticated to the linked prod project) and executed
+#                 with your host pg_dump — so you need neither prod's DB password
+#                 NOR Docker. (`supabase db dump` without --dry-run requires
+#                 Docker; this path deliberately avoids it.)
+#   PG_BIN        Directory of a pg_dump/psql >= server version; prepended to PATH.
+#   PG_DUMP_ROLE  Passed as `--role` to the raw pg_dump (PROD_DB_URL path only).
+#   DUMP_FILE     Path for the intermediate dump (default: a mktemp file, removed
+#                 on exit). Set it to keep the dump for inspection.
+#   SCHEMAS       Comma-separated schema list to copy (default: public,prompts,audit).
+#
+# USAGE
+#   eval "$(supabase branches get dev -o env)"
+#   export DEV_DB_URL="${POSTGRES_URL/:6543\//:5432/}"
+#   export PG_BIN=/opt/homebrew/opt/postgresql@17/bin   # if needed
+#   ./scripts/seed-dev-from-prod.sh
+#
+set -euo pipefail
+
+SCHEMAS="${SCHEMAS:-public,prompts,audit}"
+[[ -n "${PG_BIN:-}" ]] && export PATH="$PG_BIN:$PATH"
+
+# ── preconditions ─────────────────────────────────────────────────────────────
+if [[ -z "${DEV_DB_URL:-}" ]]; then
+  echo "ERROR: DEV_DB_URL is not set." >&2
+  echo "  eval \"\$(supabase branches get dev -o env)\"" >&2
+  echo "  export DEV_DB_URL=\"\${POSTGRES_URL/:6543\\//:5432/}\"   # session-mode pooler" >&2
+  exit 1
+fi
+command -v psql >/dev/null 2>&1 || { echo "ERROR: psql not found on PATH (set PG_BIN)." >&2; exit 1; }
+command -v pg_dump >/dev/null 2>&1 || { echo "ERROR: pg_dump not found on PATH (set PG_BIN)." >&2; exit 1; }
+command -v supabase >/dev/null 2>&1 || { echo "ERROR: supabase CLI not found on PATH." >&2; exit 1; }
+
+# Intermediate dump file. Default to a temp file removed on exit; never committed.
+CLEANUP_DUMP=0
+if [[ -z "${DUMP_FILE:-}" ]]; then
+  DUMP_FILE="$(mktemp -t prod-data-XXXXXX.sql)"
+  CLEANUP_DUMP=1
+fi
+SCRIPT_TMP=""
+cleanup() {
+  [[ -n "$SCRIPT_TMP" ]] && rm -f "$SCRIPT_TMP"
+  [[ "$CLEANUP_DUMP" == "1" ]] && rm -f "$DUMP_FILE"
+}
+trap cleanup EXIT
+
+# ── 1. dump production DATA ONLY (read-only on prod) ──────────────────────────
+echo ">> Dumping production data (schemas: $SCHEMAS) ..."
+if [[ -n "${PROD_DB_URL:-}" ]]; then
+  echo "   source: raw pg_dump via PROD_DB_URL"
+  PG_SCHEMA_FLAGS=()
+  IFS=',' read -ra _schemas <<< "$SCHEMAS"
+  for s in "${_schemas[@]}"; do PG_SCHEMA_FLAGS+=(--schema "$s"); done
+  ROLE_FLAG=()
+  [[ -n "${PG_DUMP_ROLE:-}" ]] && ROLE_FLAG=(--role "$PG_DUMP_ROLE")
+  # Prefix the trigger-disable so FK order doesn't matter on restore.
+  printf 'SET session_replication_role = replica;\n' > "$DUMP_FILE"
+  pg_dump --data-only --no-owner --no-privileges "${ROLE_FLAG[@]}" \
+    "${PG_SCHEMA_FLAGS[@]}" "$PROD_DB_URL" >> "$DUMP_FILE"
+else
+  echo "   source: supabase db dump --linked --dry-run, executed on host pg_dump"
+  echo "           (CLI-authenticated to linked prod; no prod password, no Docker)"
+  # `supabase db dump` (no --dry-run) shells out to a Dockerised pg_dump. The
+  # --dry-run flag instead PRINTS the exact, self-contained pg_dump script
+  # (correct flags + per-run login role + the SET header + the restrict-line
+  # sed). We capture that to a private temp file and run it with the HOST client,
+  # which avoids Docker. Secrets stay inside the temp file (chmod 600), are never
+  # printed, and the file is deleted on exit.
+  SCRIPT_TMP="$(mktemp -t dump-script-XXXXXX.sh)"
+  chmod 600 "$SCRIPT_TMP"
+  supabase db dump --linked --dry-run --data-only --use-copy -s "$SCHEMAS" \
+    > "$SCRIPT_TMP" 2>/dev/null
+  if ! head -1 "$SCRIPT_TMP" | grep -q '^#!/usr/bin/env bash'; then
+    echo "ERROR: unexpected --dry-run output (CLI format may have changed)." >&2
+    echo "       Provide PROD_DB_URL to use the raw pg_dump path instead." >&2
+    exit 1
+  fi
+  bash "$SCRIPT_TMP" > "$DUMP_FILE"
+fi
+echo "   dump written ($(wc -l < "$DUMP_FILE" | tr -d ' ') lines)."
+
+# ── 2. restore into the dev branch (single session => trigger-disable holds) ──
+echo ">> Restoring into dev branch ..."
+psql "$DEV_DB_URL" -v ON_ERROR_STOP=1 -f "$DUMP_FILE"
+
+echo ">> Done. Spot-check, e.g.:"
+echo "   psql \"\$DEV_DB_URL\" -c 'select count(*) from public.companies;'"
